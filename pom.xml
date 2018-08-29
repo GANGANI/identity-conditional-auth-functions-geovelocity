@@ -32,6 +32,9 @@
     <name>Conditional Authentication - Geo-velocity Related Functions parent</name>
     <url>http://wso2.org</url>
 
+    <modules>
+        <module>components/org.wso2.carbon.identity.conditional.auth.functions.geovelocity</module>
+    </modules>
 
     <dependencyManagement>
         <dependencies>
