@@ -1,23 +1,42 @@
-@App:name("GeoVelocity-Login")
+@App:name("Geo-velocityBasedLogin")
 @App:description("Description of the plan")
- 
-@Source(type = 'http-request', source.id='testsource', receiver.url="https://localhost:8280/GeoVelocity-Login/InputStream",@map(type='json', @attributes(messageId='trp:messageId', username='$.event.username', loginTime='$.event.loginTime',latitude='$.event.latitude' , longitude = '$.event.longitude')))
+
+@Source(type = 'http-request', source.id='testsource', receiver.url="https://localhost:8280/Geo-velocityBasedLogin/InputStream",@map(type='json', @attributes(messageId='trp:messageId', username='$.event.username', loginTime='$.event.loginTime',latitude='$.event.latitude' , longitude = '$.event.longitude')))
 define stream InputStream (messageId string, username string, loginTime string,latitude double, longitude double);
 
 @sink(type='http-response', source.id='testsource', message.id='{{messageId}}', @map(type='json'))
 define stream OutputStream (messageId string, username string, velocity double);
 
+@primaryKey('username')
+@index('loginTime')
+@store(type='rdbms', jdbc.url="jdbc:mysql://localhost:3306/LoginDetailsDB", username="root", password="root" , jdbc.driver.name="com.mysql.jdbc.Driver")
+define table LoginDetails(username string, loginTime string,latitude double, longitude double);
+
+define stream LoginDetailsStream (messageId string, username string, distance double, timeGap int);
+
 define function timeGapFn[javascript] return int{
-    var timeGap = Math.floor(parseInt(data[1])-parseInt(data[0]));
+    var timeGap = Math.floor(parseInt(data[0])-parseInt(data[1]));
     return timeGap
     };
 
-from every e1=InputStream -> e2=InputStream[e1.username == e2.username]<2:> within 10 min
-select e1[last].messageId, e1[last].username, geo:distance(e1[last].latitude,e1[last].longitude,e2.latitude,e2.longitude) as distance,timeGapFn(e1[last].loginTime,e2.loginTime) as timeGap
+from InputStream#window.length(1) join LoginDetails
+on InputStream.username==LoginDetails.username
+select InputStream.messageId as messageId, InputStream.username as username, ifThenElse(LoginDetails.latitude is null,100.0,geo:distance(InputStream.latitude,InputStream.longitude,LoginDetails.latitude,LoginDetails.longitude)) as distance,ifThenElse(LoginDetails.loginTime is null, 25,timeGapFn(InputStream.loginTime,LoginDetails.loginTime)) as timeGap
+insert into LoginDetailsStream;
+
+from InputStream#window.length(1)[LoginDetails.username!=username in LoginDetails]
+select InputStream.messageId as messageId, InputStream.username as username, 0.0 as distance,1 as timeGap
 insert into LoginDetailsStream;
 
 from LoginDetailsStream
-select messageId, username,ifThenElse(timeGap is null,0.0,distance/timeGap) as velocity
+select messageId, username,(distance/timeGap) as velocity
 insert into OutputStream;
+
+from InputStream#window.length(1)
+select username, loginTime, latitude, longitude
+update or insert into LoginDetails
+set LoginDetails.username = username, LoginDetails.loginTime = loginTime, LoginDetails.latitude = latitude, LoginDetails.longitude = longitude
+    on LoginDetails.username == username;
+
 
 
