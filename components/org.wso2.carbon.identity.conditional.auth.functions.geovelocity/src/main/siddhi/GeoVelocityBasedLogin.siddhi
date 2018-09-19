@@ -1,0 +1,65 @@
+@App:name("GeoVelocityBasedLogin")
+@App:description("Description of the plan")
+
+@Source(type = 'http-request', source.id='testsource', receiver.url="https://localhost:8280/GeoVelocityBasedLogin/InputStream",@map(type='json', @attributes(messageId='trp:messageId', username='$.event.username', loginTime='$.event.loginTime', loginIp='$.event.loginIp')))
+define stream InputStream (messageId string, username string, loginIp string, loginTime string);
+
+@sink(type='http-response', source.id='testsource', message.id='{{messageId}}', @map(type='json'))
+define stream OutputStream (messageId string, username string, risk double);
+
+@primaryKey('username')
+@index('loginTime')
+@store(type='rdbms', jdbc.url="jdbc:mysql://localhost:3306/LoginDetailsDB", username="root", password="root" , jdbc.driver.name="com.mysql.jdbc.Driver")
+define table GeoVelocityDetails(username string, loginTime string,city string);
+
+define function timeGapFn[javascript] return int{
+    var timeGap = Math.floor(parseInt(data[0])-parseInt(data[1]));
+    return timeGap
+};
+
+from InputStream#window.length(1) join GeoVelocityDetails
+on InputStream.username==GeoVelocityDetails.username
+select InputStream.messageId as messageId, InputStream.username as username,  geo:findCityFromIP(InputStream.loginIp) as currentLocation, GeoVelocityDetails.city as lastLocation,InputStream.loginTime as currentLoginTime,GeoVelocityDetails.loginTime as lastLoginTime
+insert into LoginDetailsStream;
+
+from InputStream#window.length(1)[GeoVelocityDetails.username!=username in GeoVelocityDetails]
+select InputStream.messageId as messageId, InputStream.username as username,geo:findCityFromIP(InputStream.loginIp) as currentLocation, geo:findCityFromIP(InputStream.loginIp) as lastLocation,InputStream.loginTime as currentLoginTime,InputStream.loginTime as lastLoginTime
+insert into LoginDetailsStream;
+
+from LoginDetailsStream#geo:geocode(currentLocation)
+select messageId, username, longitude as longi1, latitude as lati1, currentLoginTime
+insert into CurrentLoginDetailsStream;
+
+from LoginDetailsStream#geo:geocode(lastLocation)
+select messageId, username, longitude as longi2, latitude as lati2, lastLoginTime
+insert into LastLoginDetailsStream;
+
+from LastLoginDetailsStream#window.length(1) join CurrentLoginDetailsStream#window.length(1)
+on CurrentLoginDetailsStream.username == LastLoginDetailsStream.username
+select LastLoginDetailsStream.messageId, CurrentLoginDetailsStream.username, 
+    geo:distance(CurrentLoginDetailsStream.lati1,CurrentLoginDetailsStream.longi1,LastLoginDetailsStream.lati2,LastLoginDetailsStream.longi2) as distance,
+    timeGapFn(CurrentLoginDetailsStream.currentLoginTime, LastLoginDetailsStream.lastLoginTime) as timeGap
+insert into GeoVelocityStream;
+
+from GeoVelocityStream
+select messageId, username, ifThenElse(distance==0,0.0,(distance/timeGap))  as velocity
+insert into riskCalculationStream;
+
+/**Compare with the maximum flight speed**/
+from riskCalculationStream
+select messageId, username, ifThenElse(velocity>0.25,1.0,ifThenElse(velocity==0.0, 0.0, 0.2))  as risk
+
+insert into OutputStream;
+
+from InputStream#window.length(1)
+select username, loginTime, geo:findCityFromIP(loginIp) as city
+update or insert into GeoVelocityDetails
+set GeoVelocityDetails.username = username, GeoVelocityDetails.loginTime = loginTime, GeoVelocityDetails.city=city
+    on GeoVelocityDetails.username == username;
+
+    
+
+
+
+
+
